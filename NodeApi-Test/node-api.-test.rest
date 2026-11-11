@@ -1,0 +1,20 @@
+### Register User
+POST http://localhost:7000/auth/register
+Content-Type: application/json
+
+{
+  "name": "Ali Hamza",
+  "email": "hamza@example.com",
+  "password": "SecurePassword123"
+}
+
+### Login User
+POST http://localhost:7000/auth/login
+Content-Type: application/json
+
+{
+  
+  "email": "hasd@example.com",
+  "password": "SecurePassword123"
+}
+

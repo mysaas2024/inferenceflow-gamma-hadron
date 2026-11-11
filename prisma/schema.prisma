@@ -1,0 +1,303 @@
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum UserRole {
+  ADMIN
+  USER
+}
+
+enum DatasetStatus {
+  UPLOADING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum EventClass {
+  GAMMA
+  HADRON
+}
+
+enum ModelStatus {
+  TRAINING
+  READY
+  DEPLOYED
+  ARCHIVED
+  FAILED
+}
+
+enum InferenceStatus {
+  PENDING
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum InferenceType {
+  SINGLE
+  BATCH
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  FAILED
+}
+
+// ==========================================
+// USER
+// ==========================================
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @unique
+  password  String
+  name      String?
+  role      UserRole @default(USER)
+  isActive  Boolean  @default(true)
+
+  datasets          Dataset[]
+  inferenceRequests InferenceRequest[]
+  apiKeys           ApiKey[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([role])
+  @@index([createdAt])
+}
+
+// ==========================================
+// API KEY
+// ==========================================
+
+model ApiKey {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String
+  keyHash    String   @unique
+  isActive   Boolean  @default(true)
+  expiresAt  DateTime?
+  lastUsedAt DateTime?
+
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ==========================================
+// DATASET
+// ==========================================
+
+model Dataset {
+  id          String        @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+  fileName    String?
+  storageUri  String?
+  checksum    String?
+  recordCount Int           @default(0)
+  status      DatasetStatus @default(UPLOADING)
+
+  uploadedById String @db.Uuid
+  uploadedBy   User   @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  records DatasetRecord[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([uploadedById])
+  @@index([status])
+}
+
+// ==========================================
+// DATASET RECORD
+// One MAGIC telescope observation
+// ==========================================
+
+model DatasetRecord {
+  id String @id @default(uuid()) @db.Uuid
+
+  datasetId String  @db.Uuid
+  dataset   Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  // Ten input features used by the ML model
+  features Json
+
+  // Actual label, if known
+  actualClass EventClass?
+
+  predictions PredictionResult[]
+
+  createdAt DateTime @default(now())
+
+  @@index([datasetId])
+  @@index([actualClass])
+}
+
+// ==========================================
+// MODEL VERSION
+// Stores trained PyTorch model metadata
+// ==========================================
+
+model ModelVersion {
+  id          String      @id @default(uuid()) @db.Uuid
+  name        String
+  version     String
+  description String?
+  status      ModelStatus @default(TRAINING)
+
+  // Locations of model and scaler artifacts
+  artifactUri      String
+  scalerUri        String?
+  artifactChecksum String?
+
+  // Model configuration
+  features      Json
+  classes       Json
+  preprocessing Json?
+  metrics       Json?
+
+  framework   String @default("PyTorch")
+  architecture String @default("10-64-32-2")
+  inputSize    Int    @default(10)
+
+  inferenceRequests InferenceRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([name, version])
+  @@index([status])
+}
+
+// ==========================================
+// INFERENCE REQUEST
+// Represents one prediction operation
+// ==========================================
+
+model InferenceRequest {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Unique identifier for the request
+  requestId String @unique @db.VarChar(100)
+
+  // Distributed tracing
+  traceId String? @db.VarChar(64)
+
+  // Prevent duplicate processing
+  idempotencyKey String? @unique @db.VarChar(255)
+
+  type   InferenceType   @default(SINGLE)
+  status InferenceStatus @default(PENDING)
+
+  // Input observation or batch of observations
+  inputFeatures Json
+
+  observationCount Int @default(1)
+
+  latencyMs  Int?
+  retryCount Int @default(0)
+
+  errorCode    String?
+  errorMessage String?
+
+  // Request owner
+  userId String? @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Model used for inference
+  modelVersionId String?       @db.Uuid
+  modelVersion   ModelVersion? @relation(fields: [modelVersionId], references: [id], onDelete: Restrict)
+
+  results PredictionResult[]
+
+  queuedAt    DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([modelVersionId])
+  @@index([traceId])
+}
+
+// ==========================================
+// PREDICTION RESULT
+// Stores individual model predictions
+// ==========================================
+
+model PredictionResult {
+  id String @id @default(uuid()) @db.Uuid
+
+  inferenceRequestId String          @db.Uuid
+  inferenceRequest   InferenceRequest @relation(fields: [inferenceRequestId], references: [id], onDelete: Cascade)
+
+  // Position of the observation in a batch
+  observationIndex Int @default(0)
+
+  // Optional link to an uploaded dataset record
+  datasetRecordId String?        @db.Uuid
+  datasetRecord   DatasetRecord? @relation(fields: [datasetRecordId], references: [id], onDelete: SetNull)
+
+  predictedClass EventClass
+
+  gammaProbability  Float
+  hadronProbability Float
+  confidence        Float
+
+  createdAt DateTime @default(now())
+
+  @@unique([inferenceRequestId, observationIndex])
+  @@index([predictedClass])
+  @@index([datasetRecordId])
+  @@index([createdAt])
+}
+
+// ==========================================
+// OUTBOX EVENT
+// Reliable event publishing to RabbitMQ/Kafka
+// ==========================================
+
+model OutboxEvent {
+  id String @id @default(uuid()) @db.Uuid
+
+  eventType     String @db.VarChar(150)
+  aggregateType String @db.VarChar(100)
+  aggregateId   String @db.VarChar(100)
+
+  payload Json
+
+  status   OutboxStatus @default(PENDING)
+  attempts Int          @default(0)
+
+  nextAttemptAt DateTime  @default(now())
+  publishedAt   DateTime?
+  lastError     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([aggregateType, aggregateId])
+  @@index([createdAt])
+}
